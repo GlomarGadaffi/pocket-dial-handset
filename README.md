@@ -1,101 +1,134 @@
-# pocketdial-voice-poc
+# tincan
 
-A **spike** to prove the missing half of [ESPHome feature request #3112](https://github.com/esphome/feature-requests/issues/3112):
-a SIP **endpoint with real audio media** on an ESP32-S3 — mic → SIP, SIP → speaker.
+**A SIP voice endpoint on an ESP32-S3 — registers to a PBX, places a call, and carries two-way G.711 audio peer-to-peer.** A working answer to the long-standing "SIP voice on ESP32" ask in [ESPHome feature-request #3112](https://github.com/esphome/feature-requests/issues/3112).
 
-> **Status: dev spike, not a product.** Built to validate (or kill) the "all-in-one
-> ESP32 SIP voice" idea before committing to a repo/license structure. Target board
-> is the only integrated dev board on hand; all board specifics live in one header.
+> **Status: validated proof-of-concept.** The full path — `REGISTER → INVITE → ring → answer → bidirectional RTP audio → BYE → clean teardown` — has been confirmed on real silicon (LilyGO T3-S3 MVSRBoard) against a live [pocket-dial](https://github.com/GlomarGadaffi/pocket-dial) server. It is **not** production firmware: half-duplex, no jitter buffer, no digest auth (see [Constraints](#constraints--engineering-notes)). It is a clean, honest base to build on.
 
-## Why this exists
+---
 
-- **pocket-dial** (MIT) is a great SIP *registrar/proxy* on ESP32 — but it deliberately
-  never touches audio (RTP flows peer-to-peer).
-- **chrta/sip_call** (AGPL) initiates SIP calls on a GPIO trigger — but has no media path.
-- **#3112** is fundamentally an **audio** problem, present in neither. This spike builds
-  exactly that gap, reusing pocket-dial's MIT SIP parser for the fiddly bits.
+## What it does
+
+pocket-dial (and its upstream, BarGabriel/SipServer) is a SIP **registrar/proxy** — it brokers signaling but never touches audio. The #3112 ask is the other half: a SIP **endpoint** that actually moves voice. tincan is that endpoint. It speaks just enough SIP to register and set up a call, then streams G.711/RTP **directly to the far end** (the proxy stays out of the media path), so a $10 MCU coordinates and carries a real phone call.
+
+```
+        ESP32-S3 (tincan)                      pocket-dial PBX            ext 102 (phone)
+   mic ─I2S─► G.711 ─► RTP ─┐                  192.168.x.2:5060            192.168.x.181
+                            ├─ SIP REGISTER/INVITE/ACK/BYE ─►  ──routes──►  rings / answers
+   spk ◄I2S─ G.711 ◄─ RTP ─┘                                                     │
+        ▲                                                                        │
+        └──────────────── RTP (G.711 µ-law, UDP) flows PEER-TO-PEER ─────────────┘
+```
+
+---
 
 ## Target hardware
 
-**LilyGO T3-S3 MVSRBoard** (ESP32-S3, 4 MB flash) — board rev **V1.1**:
-- Mic: **MP34DT05-A** PDM MEMS → **I2S0** PDM-RX (CLK 15, DATA 48, EN 35)
-- Amp: **MAX98357A** I2S class-D → **I2S1** std-TX (BCLK 40, LRCLK 41, DATA 39, SD 38)
-- Vibration motor (PWM, GPIO46) — simulates the doorbell "actuation"
-- PTT = BOOT button (GPIO0)
+**LilyGO T3-S3 MVSRBoard** — board revision **V1.1** (silkscreen). ESP32-S3 (dual Xtensa LX7 @ 240 MHz), 4 MB flash, QSPI PSRAM present but unused.
 
-> ESP32-S3 PDM RX only works on I2S0, so the mic owns I2S0 and the speaker moves to
-> I2S1. The S3 hardware PDM→PCM filter yields 16-bit PCM; we capture at 16 kHz and
-> decimate 2:1 to the 8 kHz G.711 rate. (V1.0 boards have an MSM261 *I2S* mic on
-> BCLK 47/WS 15/DATA 48 needing `i2s_channel_init_std_mode` — see `board_mvsr.h`.)
+| Function | Part | Bus / pins |
+|---|---|---|
+| Microphone | **MP34DT05-A** PDM MEMS | **I2S0** (PDM-RX): CLK `IO15`, DATA `IO48`, EN `IO35` |
+| Speaker amp | **MAX98357A** class-D | **I2S1** (std-TX): BCLK `IO40`, LRCLK `IO41`, DIN `IO39`, SD_MODE `IO38` |
+| Haptic | vibration motor | `IO46` (call-state buzz) |
+| Push-to-talk | BOOT button | `IO0` (held = talk, released = listen) |
 
-## The design (deliberately half-duplex)
+> **Why the split:** on the ESP32-S3, PDM RX is only available on I2S0, so the mic owns I2S0 and the speaker (standard Philips mode) takes I2S1 — two independent controllers. All board specifics live in [`main/board_mvsr.h`](main/board_mvsr.h); a different board is a single-file swap. *(V1.0 boards ship an MSM261 I2S mic on BCLK 47/WS 15/DATA 48 and need `i2s_channel_init_std_mode` instead — noted in the header.)*
 
-Push-to-talk gates direction, so mic and speaker are never live at once →
-**no acoustic echo cancellation needed**, which removes the single hardest part of
-ESP32 two-way voice. AEC is a later upgrade, not a blocker.
+**Memory budget:** firmware image ≈ 830 KB in a 1.5 MB factory partition (`SINGLE_APP_LARGE`); ≈ 289 KB internal RAM free for heap at runtime. Comfortable headroom.
+
+---
+
+## Firmware architecture
+
+Single-task design — `app_main` (main task, CPU0) runs setup, then the media loop. No dynamic allocation in the hot path; SIP message buffers are stack-local and bounded.
 
 ```
- BOOT held : mic --I2S--> [G.711 µ-law] --> [RTP] --UDP--> ext 102 phone (P2P)
- BOOT up   : ext 102 phone --UDP--> [RTP] --> [G.711] --I2S--> MAX98357A speaker
+boot ─► NVS ─► audio_init (PDM mic + amp, amp OFF) ─► Wi-Fi STA (blocks until IP)
+     ─► SIP REGISTER ext 500 (no auth)  ─► INVITE ext 102 via proxy
+     ─► [180 Ringing, up to ~120 s]      ─► 200 OK ─► ACK ─► amp ON
+     ─► media loop (push-to-talk, 20 ms frames)
+     ─► peer BYE detected ─► amp OFF ─► idle
 ```
 
-Codec: G.711 µ-law (PCMU, PT 0), 8 kHz mono, 20 ms / 160-sample frames.
-Signaling: `REGISTER` ext **500** (no auth — pocket-dial is an open registrar) →
-`INVITE` ext **102** *through* the server → `200 OK → ACK` → `BYE`. The pocket-dial
-server proxies signaling only; the `200 OK` carries ext 102's own SDP, so **RTP audio
-flows peer-to-peer** straight between the board and the phone.
+- **Audio path:** PDM mic captured at **16 kHz** through the S3's hardware PDM→PCM filter (`SOC_I2S_SUPPORTS_PDM2PCM`), decimated 2:1 to the **8 kHz** G.711 rate; speaker fed at 8 kHz on the second I2S controller.
+- **Codec / framing:** G.711 µ-law (PCMU, RTP payload type 0), 8 kHz mono, **20 ms / 160-sample frames**. The blocking I2S read paces the loop — no software timer needed.
+- **Half-duplex by design:** PTT gates direction, so mic and speaker are never live simultaneously → **acoustic echo cancellation is sidestepped entirely**, removing the single hardest part of ESP32 two-way voice.
+- **Amp gating:** `SD_MODE` is held low except during a connected call — eliminates the continuous I2S-underrun click while booting/ringing/idle.
+- **Clean teardown:** the media loop polls the signaling socket (non-blocking) for an inbound `BYE`; on hangup it stops, mutes the amp, and idles. RTP underrun feeds a silence frame so the DMA never repeats a stale buffer.
+- **SIP layer:** vendored from pocket-dial (MIT) for message (de)serialization; the user-agent **client** logic (`main/sip_uac.cpp`) — REGISTER/INVITE/ACK/BYE construction, response parsing, SDP endpoint extraction — is original.
 
-## Build / flash / test
+---
 
-1. **Edit `main/poc_config.h`** — set `POC_WIFI_SSID`/`POC_WIFI_PASS`. Defaults already
-   target the pocket-dial server at `192.168.12.2:5060`, register as ext `500`, call ext `102`.
-2. **Have ext 102 registered** to the same pocket-dial server (a softphone or IP phone)
-   and ready to answer.
-3. Build & flash with ESP-IDF v5.1+ / v6.x:
-   ```
-   idf.py set-target esp32s3
-   idf.py -p <PORT> flash monitor
-   ```
+## Build / flash / run
 
-### Definition of done (the credibility gate)
+Requires **ESP-IDF** (validated on **v5.2.1**; also builds on **v6.0.1** — the CMake guards the v6 `esp_driver_*` component split).
 
-> Power on → board joins Wi-Fi → **REGISTERs as ext 500** with the pocket-dial server →
-> motor buzzes → **INVITEs ext 102 through the server** → 102 answers → **hold BOOT and
-> talk: you're heard on 102's phone; release BOOT: 102's audio plays out the board
-> speaker.** Intelligible both ways, with RTP flowing board↔102 directly (P2P).
+```sh
+# 1. Configure your network + targets
+#    edit main/poc_config.h: POC_WIFI_SSID / POC_WIFI_PASS
+#    (defaults: server 192.168.12.2:5060, register as 500, call 102)
 
-If that works, the "all-in-one" idea is real and worth a proper repo. If the audio is
-garbage, we learn the hard truth cheaply.
+# 2. Build + flash + monitor
+idf.py set-target esp32s3
+idf.py -p <PORT> flash monitor
+```
+
+A peer at **ext 102** must be registered to the same pocket-dial server and able to answer. On boot the board auto-dials it; answer, hold **BOOT** to talk, release to listen, hang up to end.
+
+---
+
+## Validation
+
+Confirmed end-to-end on a LilyGO T3-S3 MVSRBoard ↔ pocket-dial server (Raspberry Pi), serial + server-side `journalctl` cross-checked:
+
+```
+registered as 500
+INVITE 102 → 100 Trying → 180 Ringing → 200 OK → ACK
+P2P media to 192.168.12.181  (two-way G.711, intelligible both directions)
+<- BYE (peer hung up) → call ended → idle    (no looping, no clicking)
+```
+
+---
+
+## Constraints & engineering notes
+
+The footguns that bit during bring-up — documented so they don't bite again:
+
+- **`thread_local` TLS bloat is lethal on small RTOS tasks.** The vendored `IDGen` originally used `thread_local std::mt19937` (~2.5 KB). ESP-IDF copies the TLS template into *every* task stack, overflowing the idle (~1.5 KB) and IPC (~1.3 KB) tasks at creation → boot crash (`esp_ipc_init` assert on v6.0.1; SMP-scheduler `LoadProhibited` on v5.2.1 — same bug, two faces). Fixed by using `esp_random()` (stateless, zero TLS). **Audit vendored C++ for `thread_local` before putting it on an MCU.**
+- **IDF v6 driver split:** `driver/i2s_std.h`, `driver/i2s_pdm.h`, `driver/gpio.h` moved to `esp_driver_i2s` / `esp_driver_gpio` on v6.0. CMake selects per `IDF_VERSION_MAJOR`.
+- **Flash mode:** DIO (the board's flash didn't benefit from QIO; DIO is the safe default here).
+- **No jitter buffer** — direct play-out. Fine on a quiet LAN; will need a small adaptive buffer for congested networks.
+- **No acoustic echo cancellation** — intentional (half-duplex PTT). Required before full-duplex.
+- **No digest auth** — relies on pocket-dial's open registrar. Add MD5 digest (RFC 3261 §22) for a real PBX.
+
+---
 
 ## What's real vs. stubbed
 
-| Part | State |
+| Component | State |
 |---|---|
-| Board pin map, dual-I2S bring-up | ✅ real |
-| G.711 µ-law encode/decode | ✅ real (CCITT reference) |
-| RTP framing (TX) | ✅ real |
-| REGISTER (ext 500, no auth) + INVITE/ACK/BYE via server | ✅ real (parser vendored from pocket-dial) |
-| Push-to-talk half-duplex media loop | ✅ real |
-| **Jitter buffer** | ⚠️ none — direct play-out (fine on a quiet LAN; add later) |
-| Mic capture (PDM → PCM) | ✅ real — PDM2PCM @ 16 kHz, 2:1 decimate to 8 kHz (V1.1 MP34DT05) |
-| **Digest auth (MD5)** | ❌ not needed — pocket-dial is an open registrar |
-| **Acoustic echo cancellation** | ❌ intentionally avoided via PTT |
-| **Incoming calls / full duplex** | ❌ later milestone |
+| Board pin map + dual-I2S bring-up | ✅ real, on silicon |
+| PDM mic capture (16 kHz → 8 kHz decimate) | ✅ real |
+| G.711 µ-law codec | ✅ real (CCITT/Sun reference) |
+| RTP framing + P2P media transport | ✅ real |
+| SIP UAC: REGISTER / INVITE / ACK / BYE | ✅ real |
+| Push-to-talk half-duplex + clean BYE teardown | ✅ real |
+| Jitter buffer | ⚠️ none (direct play-out) |
+| Digest auth (MD5) | ❌ open registrar only |
+| Acoustic echo cancellation / full duplex | ❌ roadmap |
+| Incoming calls (answer, not just originate) | ❌ roadmap |
+
+## Roadmap
+
+Adaptive jitter buffer · digest auth · full-duplex + AEC · inbound call handling · dial-on-button (vs auto-dial on boot) · packaging as an ESPHome external component.
+
+---
 
 ## License & attribution
 
 **MIT** — see [LICENSE](LICENSE). Dual copyright:
 
-- **Original work** (audio pipeline, G.711, RTP, the `sip_uac` SIP client, Wi-Fi/board
-  integration, application code) — © 2026 GlomarGadaffi.
-- **Vendored SIP message parser** in [`components/sip_core/`](components/sip_core/)
-  (`SipMessage`, `SipSdpMessage`, `SipMessageFactory`, `SipMessageTypes`, `IDGen`) —
-  © 2022 BarGabriel, derived via [pocket-dial](https://github.com/GlomarGadaffi/pocket-dial)
-  from **[BarGabriel/SipServer](https://github.com/BarGabriel/SipServer)** (MIT).
+- **Original work** (audio pipeline, G.711, RTP, the `sip_uac` SIP client, Wi-Fi/board integration, application code) — © 2026 GlomarGadaffi.
+- **Vendored SIP message parser** in [`components/sip_core/`](components/sip_core/) (`SipMessage`, `SipSdpMessage`, `SipMessageFactory`, `SipMessageTypes`, `IDGen`) — © 2022 BarGabriel, derived via [pocket-dial](https://github.com/GlomarGadaffi/pocket-dial) from **[BarGabriel/SipServer](https://github.com/BarGabriel/SipServer)** (MIT).
 
-Also referenced (no license obligation, credited anyway):
-- **G.711 µ-law** — the canonical CCITT / Sun reference companding algorithm.
-- **Pin map** — from LilyGO's [T3-S3-MVSRBoard](https://github.com/Xinyuan-LilyGO/T3-S3-MVSRBoard) `pin_config.h`.
-
-Fully permissive: built on MIT code only — **no copyleft dependencies** (notably *not* the
-AGPL `chrta/sip_call`).
+Also referenced (credited, no obligation): the **G.711** CCITT/Sun reference companding algorithm, and LilyGO's [T3-S3-MVSRBoard](https://github.com/Xinyuan-LilyGO/T3-S3-MVSRBoard) `pin_config.h` for the pin map. Built on MIT code only — **no copyleft dependencies**.
