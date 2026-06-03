@@ -1,0 +1,14 @@
+# Normalize line endings: store LF in the repository for all text files,
+# regardless of contributor OS (silences the autocrlf LF/CRLF churn).
+* text=auto eol=lf
+
+# Shell scripts must stay LF even when checked out on Windows.
+*.sh text eol=lf
+
+# Binary assets — never normalize or diff as text.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.bin  binary
+*.elf  binary
