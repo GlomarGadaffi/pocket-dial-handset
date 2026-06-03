@@ -1,0 +1,17 @@
+# ESP-IDF build output
+/build/
+/build_*/
+
+# Generated sdkconfig (keep sdkconfig.defaults tracked)
+/sdkconfig
+/sdkconfig.old
+
+# Managed component manager artifacts
+/managed_components/
+/dependencies.lock
+
+# Editor / OS
+.vscode/
+*.orig
+*.swp
+.DS_Store
