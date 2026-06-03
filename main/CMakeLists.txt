@@ -15,7 +15,7 @@ idf_component_register(
         "net_wifi.c"
     INCLUDE_DIRS "."
     REQUIRES
-        ${DRIVER_REQUIRES}   # i2s_std + gpio
+        ${DRIVER_REQUIRES}   # i2s_std + i2s_pdm + gpio
         esp_wifi
         esp_netif
         esp_event

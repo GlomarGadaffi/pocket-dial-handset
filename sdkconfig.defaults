@@ -1,13 +1,11 @@
 # ── Target: LilyGO T3-S3 MVSRBoard (ESP32-S3, 4 MB flash) ──────────────────
 CONFIG_IDF_TARGET="esp32s3"
-
-# 4 MB flash — NOTE: pocket-dial defaults to 16MB; this board is 4MB.
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
-CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
-CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+# Flash mode left at default (DIO) — verified working on this board's flash;
+# QIO gave no benefit here.
 
-# 1.5 MB app partition fits comfortably in 4 MB.
+# 1.5 MB app partition (image is ~830 KB).
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
 
 # C++ exceptions — the vendored pocket-dial SIP parser uses them.
@@ -16,5 +14,5 @@ CONFIG_COMPILER_CXX_EXCEPTIONS=y
 # 1 kHz tick for tighter 20 ms RTP frame pacing.
 CONFIG_FREERTOS_HZ=1000
 
-# app_main runs the call setup before spawning the media task.
+# app_main runs call setup + the media loop.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

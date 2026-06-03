@@ -2,7 +2,6 @@
 #include <string>
 #include <cstring>
 #include <stdexcept>
-#include <iostream>
 #include <cctype>
 
 SipSdpMessage::SipSdpMessage(std::string message, sockaddr_in src) : SipMessage(std::move(message), src)

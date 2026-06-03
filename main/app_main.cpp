@@ -89,8 +89,11 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(nvs_flash_init());
     gpio_init();
 
-    ESP_ERROR_CHECK(wifi_sta_connect(POC_WIFI_SSID, POC_WIFI_PASS));
+    // Bring up the PDM mic + speaker FIRST, so hardware init is validated and
+    // logged on boot — before the (blocking) Wi-Fi join.
     ESP_ERROR_CHECK(audio_init());
+
+    ESP_ERROR_CHECK(wifi_sta_connect(POC_WIFI_SSID, POC_WIFI_PASS));
 
     ESP_LOGI(TAG, "local IP %s — registering ext %s with server %s:%d",
              wifi_local_ip(), POC_SIP_EXT_SELF, POC_SIP_SERVER_IP, POC_SIP_SERVER_PORT);
