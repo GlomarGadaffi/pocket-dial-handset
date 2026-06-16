@@ -15,3 +15,11 @@
 *.orig
 *.swp
 .DS_Store
+
+# local docs — read the code
+docs/
+notes/
+*.txt
+LINEAGE.md
+*.old
+*.bak
