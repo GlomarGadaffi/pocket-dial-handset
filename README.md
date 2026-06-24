@@ -1,4 +1,4 @@
-# ashburn-messenger
+# pocket-dial-handset
 
 ESP32-S3 SIP voice endpoint: push-to-talk G.711 over Wi-Fi with peer-to-peer RTP. registers to the pocket-dial SIP server (an open registrar, no auth), calls a fixed extension through it, and runs a half-duplex media loop — pressing the button (BOOT pin) sends compressed audio, releasing listens. signaling goes through the server; RTP flows peer-to-peer.
 
