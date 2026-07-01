@@ -18,6 +18,10 @@ static i2s_chan_handle_t s_mic = NULL;   // RX  <- MP34DT05-A PDM mic (I2S0, pdm
 static void init_speaker(void)
 {
     i2s_chan_config_t cc = I2S_CHANNEL_DEFAULT_CONFIG(MVSR_SPK_I2S_PORT, I2S_ROLE_MASTER);
+    // Explicit ring depth instead of the IDF default (6x240 => up to 180 ms of
+    // hidden latency). One descriptor = one 20 ms frame at 8 kHz, x4 deep.
+    cc.dma_desc_num = POC_SPK_DMA_DESC_NUM;
+    cc.dma_frame_num = POC_SPK_DMA_FRAME_NUM;
     ESP_ERROR_CHECK(i2s_new_channel(&cc, &s_spk, NULL));     // TX only
 
     i2s_std_config_t std = {
@@ -42,6 +46,10 @@ static void init_speaker(void)
 static void init_mic(void)
 {
     i2s_chan_config_t cc = I2S_CHANNEL_DEFAULT_CONFIG(MVSR_MIC_I2S_PORT, I2S_ROLE_MASTER);
+    // Explicit ring depth — see init_speaker(). One descriptor = one 20 ms
+    // frame at the 16 kHz capture rate, x4 deep.
+    cc.dma_desc_num = POC_MIC_DMA_DESC_NUM;
+    cc.dma_frame_num = POC_MIC_DMA_FRAME_NUM;
     ESP_ERROR_CHECK(i2s_new_channel(&cc, NULL, &s_mic));     // RX only
 
     i2s_pdm_rx_config_t pdm = {

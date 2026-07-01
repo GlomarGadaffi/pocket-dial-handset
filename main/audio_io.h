@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-// Bring up both I2S buses (mic RX on I2S1, speaker TX on I2S0) + enable pins.
+// Bring up both I2S buses (mic RX on I2S0, speaker TX on I2S1) + enable pins.
 esp_err_t audio_init(void);
 
 // Blocking-ish I2S transfers. Return the number of SAMPLES moved.

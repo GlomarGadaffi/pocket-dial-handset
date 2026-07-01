@@ -7,8 +7,9 @@
 //  Amp  : MAX98357A    I2S class-D, 9 dB gain
 //
 //  ESP32-S3 constraint: PDM RX is only available on I2S0, so the mic takes
-//  I2S0 and the speaker (standard I2S TX) moves to I2S1. Still two independent
-//  controllers -> full-duplex capable (we run half-duplex / push-to-talk here).
+//  I2S0 and the speaker (standard I2S TX) moves to I2S1. Two independent
+//  controllers -> full-duplex capable, and now full-duplex by default
+//  (see media_tasks.cpp; AEC tracked separately, see README roadmap).
 //
 //  (V1.0 boards instead have an MSM261 *I2S* mic on BCLK 47 / WS 15 / DATA 48;
 //   that needs i2s_channel_init_std_mode — see git history for the V1.0 variant.)
@@ -33,8 +34,10 @@
 // ── Vibration motor (PWM) — used to simulate the doorbell "actuation" ─────
 #define MVSR_MOTOR            GPIO_NUM_46
 
-// ── Push-to-talk button — reuse the BOOT button for the dev spike ─────────
-//    Pressed = LOW. Held = TALK (mic->RTP); released = LISTEN (RTP->spk).
+// ── BOOT button — was push-to-talk; unused now that media is full-duplex ──
+//    (mic->RTP and RTP->spk both run continuously, see media_tasks.cpp).
+//    Pressed = LOW. Still configured as input w/ pull-up in gpio_init();
+//    free for a future mute/override control.
 #define MVSR_PTT_BUTTON       GPIO_NUM_0
 
 // ── Optional peripherals (not used by the spike, documented for later) ────

@@ -13,6 +13,8 @@ idf_component_register(
         "audio_io.c"
         "g711.c"
         "net_wifi.c"
+        "media_tasks.cpp"
+        "playout_buffer.cpp"
     INCLUDE_DIRS "."
     REQUIRES
         ${DRIVER_REQUIRES}   # i2s_std + i2s_pdm + gpio

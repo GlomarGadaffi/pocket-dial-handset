@@ -41,3 +41,9 @@ pin definitions and audio I/O are in `board_mvsr.h`.
 ## notes
 
 proof-of-concept for ESP32 SIP voice. designed for low-latency half-duplex scenarios (field comms, homelabs, intercom). not intended for full-duplex or high-quality voice (would require AEC, jitter buffers, adaptive bitrate).
+
+> **in progress:** full duplex is landing. The PTT gate is being replaced with a
+> three-task media engine (concurrent mic/RTP-send, RTP-recv, and speaker-playout
+> tasks) plus a jitter buffer and RTP receive validation — builds clean, pending
+> a hardware smoke test. Acoustic echo cancellation (the harder part) is staged
+> as a follow-up phase once that lands. See open PRs for status.

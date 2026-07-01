@@ -2,17 +2,20 @@
 //  pocketdial-voice-poc  —  app_main
 //
 //  Flow: Wi-Fi -> bring up mic+speaker -> (motor "actuation") -> SIP INVITE to
-//  a desktop softphone -> on 200 OK, run a PUSH-TO-TALK half-duplex G.711 loop:
-//     PTT held   -> mic -> G.711 -> RTP  (talk)
-//     PTT released-> RTP -> G.711 -> speaker (listen)
-//  Half-duplex by design => no acoustic echo cancellation needed for the spike.
+//  a desktop softphone -> on 200 OK, run a FULL-DUPLEX G.711 media engine
+//  (see media_tasks.cpp): mic->RTP and RTP->speaker run concurrently on
+//  separate tasks, the whole call, no PTT gating.
+//
+//  Full duplex without acoustic echo cancellation WILL produce audible echo
+//  (the far end hears themselves) — AEC is tracked separately (see README
+//  roadmap / issue #2). This stage is the concurrency/jitter-buffer
+//  foundation AEC plugs into, not the final echo-free state.
 // ─────────────────────────────────────────────────────────────────────────
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "nvs_flash.h"
 #include "esp_log.h"
-#include "esp_random.h"
 #include "driver/gpio.h"
 
 #include <lwip/sockets.h>
@@ -23,9 +26,8 @@
 #include "board_mvsr.h"
 #include "net_wifi.h"
 #include "audio_io.h"
-#include "g711.h"
-#include "rtp.h"
 #include "sip_uac.h"
+#include "media_tasks.h"
 
 static const char *TAG = "app";
 
@@ -42,57 +44,6 @@ static void motor_buzz(int ms)
     gpio_set_level(MVSR_MOTOR, 1);
     vTaskDelay(pdMS_TO_TICKS(ms));
     gpio_set_level(MVSR_MOTOR, 0);
-}
-
-// Half-duplex push-to-talk RTP loop. Returns when the peer hangs up (BYE).
-static void media_loop(SipUac &uac, int rtp_sock, const sockaddr_in &dst)
-{
-    int16_t pcm[POC_FRAME_SAMPLES];
-    int16_t silence[POC_FRAME_SAMPLES] = {0};
-    uint8_t pkt[RTP_HEADER_LEN + POC_FRAME_SAMPLES];
-    uint8_t rx[RTP_HEADER_LEN + POC_FRAME_SAMPLES * 2];
-
-    rtp_tx_t tx = { (uint16_t)esp_random(), esp_random(), esp_random() };
-    bool talking_prev = false;
-
-    ESP_LOGI(TAG, "media loop up — hold PTT (BOOT btn) to talk, release to listen");
-
-    for (;;) {
-        if (uac.checkHangup()) {                  // peer sent BYE -> end the call
-            ESP_LOGI(TAG, "call ended by peer");
-            return;
-        }
-
-        bool ptt = (gpio_get_level(MVSR_PTT_BUTTON) == 0);   // pressed = LOW
-
-        if (ptt) {
-            size_t got = audio_read_mic(pcm, POC_FRAME_SAMPLES);   // ~20 ms of audio
-            if (got > 0) {
-                g711_ulaw_encode_buf(pcm, pkt + RTP_HEADER_LEN, got);
-                rtp_write_header(pkt, POC_RTP_PAYLOAD_PCMU, talking_prev ? 0 : 1,
-                                 tx.seq, tx.timestamp, tx.ssrc);
-                sendto(rtp_sock, pkt, RTP_HEADER_LEN + got, 0,
-                       (const sockaddr *)&dst, sizeof(dst));
-                tx.seq++;
-                tx.timestamp += got;
-            }
-            talking_prev = true;
-        } else {
-            int n = recvfrom(rtp_sock, rx, sizeof(rx), 0, NULL, NULL);
-            if (n > (int)RTP_HEADER_LEN) {
-                size_t plen = n - RTP_HEADER_LEN;
-                if (plen > POC_FRAME_SAMPLES) plen = POC_FRAME_SAMPLES;
-                g711_ulaw_decode_buf(rx + RTP_HEADER_LEN, pcm, plen);
-                audio_write_spk(pcm, plen);
-            } else {
-                // No RTP this frame: feed silence so the I2S DMA doesn't loop the
-                // last received buffer (the "looping audio" symptom). Also paces
-                // the loop ~20 ms and yields to the idle task.
-                audio_write_spk(silence, POC_FRAME_SAMPLES);
-            }
-            talking_prev = false;
-        }
-    }
 }
 
 extern "C" void app_main(void)
@@ -134,7 +85,7 @@ extern "C" void app_main(void)
     local.sin_addr.s_addr = htonl(INADDR_ANY);
     local.sin_port = htons(POC_RTP_LOCAL_PORT);
     bind(rtp_sock, (sockaddr *)&local, sizeof(local));
-    struct timeval rtv = { 0, 20 * 1000 };   // 20 ms recv timeout (listen pacing)
+    struct timeval rtv = { 0, POC_RTP_RX_TIMEOUT_MS * 1000 };   // bounds RX task's shutdown-poll interval
     setsockopt(rtp_sock, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof(rtv));
 
     sockaddr_in dst{};
@@ -142,10 +93,10 @@ extern "C" void app_main(void)
     dst.sin_addr.s_addr = inet_addr(remote.ip.c_str());
     dst.sin_port = htons(remote.port);
 
-    motor_buzz(60);                   // call answered — short confirm buzz
-    audio_amp_enable(true);           // power the speaker amp only for the live call
-    media_loop(uac, rtp_sock, dst);   // returns when the peer hangs up (BYE)
-    audio_amp_enable(false);          // amp off -> silent on idle (no underrun click)
+    motor_buzz(60);                              // call answered — short confirm buzz
+    audio_amp_enable(true);                      // power the speaker amp only for the live call
+    media_run_full_duplex(uac, rtp_sock, dst);   // returns when the peer hangs up (BYE)
+    audio_amp_enable(false);                     // amp off -> silent on idle (no underrun click)
 
     close(rtp_sock);
     motor_buzz(120);                  // call-ended haptic
